@@ -1,4 +1,12 @@
-# DexMimicGen
+# DexMimicGen (Reproduction)
+
+> **This is a reproduction of DexMimicGen's bimanual data-generation pipeline, not the
+> original authors' release.** It reconstructs the data-generation flow and validates it
+> end-to-end on the `TwoArmThreading` task. See [`REPRODUCTION.md`](REPRODUCTION.md) for
+> the full reproduction process, root-cause fixes, and success-rate analysis. All credit
+> for the method belongs to the original authors (links below).
+>
+> *Reproduction last updated: 2026-10-15.*
 
 <p align="center">
   <img width="95.0%" src="images/dexmimicgen.gif">
