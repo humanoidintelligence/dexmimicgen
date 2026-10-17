@@ -7,10 +7,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This is a **reproduction** of DexMimicGen's bimanual data-generation pipeline, not the
 original authors' release. The data-generation layer (`dexmimicgen/datagen/`,
 `dexmimicgen/env_interfaces/`, `dexmimicgen/configs/`, and the `prepare_src_dataset.py` /
-`generate_dataset.py` scripts) was reconstructed and validated end-to-end on
-`TwoArmThreading`. The simulation `environments/` and `models/` are from the original
-release. `REPRODUCTION.md` documents the reconstruction process, the two root-cause fixes,
-and the measured success-rate analysis — read it before modifying the datagen pipeline.
+`generate_dataset.py` scripts) was reconstructed, debugged end-to-end on `TwoArmThreading`,
+and extended to all **nine** tasks across three embodiments (Panda ×2, PandaDex ×2, GR1).
+All **seven tasks that ship a source dataset** are validated end-to-end (the full
+generate loop yields filtered successes): `two_arm_threading`, `two_arm_three_piece_assembly`,
+`two_arm_lift_tray`, `two_arm_box_cleanup`, `two_arm_drawer_cleanup`, `two_arm_coffee`, and
+`two_arm_pouring`. The remaining two, `two_arm_transport` and `two_arm_can_sort_random`, have
+**no source hdf5** in this repo and so are static-only (env + interface instantiate, action
+dims/slices correct, signals + `compose_action` compute) with their arm-role designs flagged
+by `NOTE` comments for later confirmation via `scripts/analyze_src_demo.py` if source data
+becomes available. The simulation `environments/` and `models/` are from the
+original release. `REPRODUCTION.md` documents the reconstruction process, the two root-cause
+fixes, the full task roster (§7), and the success-rate analysis — read it before modifying
+the datagen pipeline.
 
 ## Setup
 
@@ -104,12 +113,41 @@ The most error-prone part is keeping the arm-to-object mapping aligned across th
 `object_ref`/`subtask_term_signal` and the interface's `robot_idx`. robosuite samples
 objects at fixed +y/-y sides, and the source demos fix which arm handles which object; a
 swap here silently introduces a large lever-arm offset and drives the success rate to zero
-(this was the first root-cause bug — `REPRODUCTION.md` §4, Fix 1).
+(this was the first root-cause bug — `REPRODUCTION.md` §4, Fix 1). Note the +y/-y → arm
+convention is **mirrored** between embodiments: in the Panda/PandaDex tasks robot 0 ("right")
+handles -y objects, while in the GR1 tasks the right hand handles +y objects.
+
+### Two action conventions (OSC vs whole-body IK)
+
+`compose_action` and the pose↔action helpers in the base `DexMG_EnvInterface` assume the
+**OSC delta** convention: each arm emits `[dpos(3), daxisangle(3)]` (relative to current eef)
+plus a gripper slice — Panda parallel-jaw `gripper_dim=1` (action dim 14), PandaDex hand
+`gripper_dim=6` (action dim 24).
+
+The **GR1** tasks (coffee, pouring, can_sort_random) are different and share a `GR1Interface`
+base. Both arms are on a single robot driven by a `WholeBodyIK`/`WholeBodyMinkIK` composite
+controller; the 24-dim action is `[right_eef(6), left_eef(6), right_hand(6), left_hand(6)]`
+where each `*_eef(6)` is an **absolute** target pose `[pos(3), axis_angle(3)]` in the **world**
+frame (controller `input_ref_frame="world"`), not a delta and not base-relative — so
+`GR1Interface` packs/unpacks the pose directly with no base transform. (An earlier base-frame
+version was wrong: decoding as base-frame was off by ~1.09 m, the base height.) `GR1Interface`
+overrides `target_pose_to_action`, `action_to_target_pose`, `_arm_action_slices` and
+`env_action_dim`. The real action split is the composite controller's
+`_whole_body_controller_action_split_indexes`, NOT `robot._action_split_indexes`.
+
+Dex-hand grasp caveat: for the GR1/PandaDex tasks the contact-based grasp subtask signal
+cannot be recomputed by replaying a demo (the teleop finger contacts aren't repopulated by
+`set_state`). The shipped source `datagen_info` is authoritative, so for `coffee`/`pouring`
+run `generate_dataset.py` **directly on the shipped source** and skip `prepare_src_dataset.py`.
+Subtask signal names must match the shipped canonical names (coffee: `grasp`/`insertion`/`rim`;
+pouring: `cup_grasped`/`bowl_grasped`/`bowl_on_pad`). Only 7 of the 9 tasks ship a source
+dataset — `transport` and `can_sort_random` have none and cannot be generated here.
 
 ## Datasets & Paths
 
 - `./datasets` is a symlink to a large external store; `datasets_src/` and `datasets_gen/`
   hold multi-GB source/generated hdf5 and are gitignored (as are `report/`, `*.hdf5`, and
   vendored clones under `references/`).
-- A generated demo contains `actions (T, 14)` (bimanual 7+7), `states (T, 63)`,
-  `datagen_info`, `src_demo_inds`, `src_demo_labels`, and a `model_file` for replay.
+- A generated demo contains `actions (T, A)` (A = 14 for Panda tasks, 24 for PandaDex/GR1
+  tasks), `states (T, S)`, `datagen_info`, `src_demo_inds`, `src_demo_labels`, and a
+  `model_file` for replay.

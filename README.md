@@ -2,11 +2,14 @@
 
 > **This is a reproduction of DexMimicGen's bimanual data-generation pipeline, not the
 > original authors' release.** It reconstructs the data-generation flow and validates it
-> end-to-end on the `TwoArmThreading` task. See [`REPRODUCTION.md`](REPRODUCTION.md) for
-> the full reproduction process, root-cause fixes, and success-rate analysis. All credit
-> for the method belongs to the original authors (links below).
+> end-to-end on all **seven tasks that ship a source dataset** (threading,
+> three_piece_assembly, lift_tray, box_cleanup, drawer_cleanup, coffee, and pouring, across
+> the Panda, PandaDex, and GR1 embodiments); `transport` and `can_sort_random` ship no
+> source data in this repo and remain static-only. See [`REPRODUCTION.md`](REPRODUCTION.md)
+> for the full reproduction process, root-cause fixes, and success-rate analysis. All
+> credit for the method belongs to the original authors (links below).
 >
-> *Reproduction last updated: 2026-10-15.*
+> *Reproduction last updated: 2026-10-17.*
 
 <p align="center">
   <img width="95.0%" src="images/dexmimicgen.gif">

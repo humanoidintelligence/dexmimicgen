@@ -73,6 +73,12 @@ python scripts/prepare_src_dataset.py \
     --n 10
 ```
 
+> **Skip this step for the GR1/dex tasks (`coffee`, `pouring`).** Their shipped source
+> already carries a complete, authoritative `datagen_info`, and re-preparing would
+> overwrite the contact-based dex grasp signal with an all-zero recomputation (see §7,
+> "Dex-hand grasp signals are not recomputable at replay"). Run Step 2 directly on the
+> shipped source instead.
+
 ### Step 2 — Generate the new dataset (oversample + filter)
 
 `scripts/generate_dataset.py` repeatedly calls `DataGenerator.generate()` on randomized
@@ -206,10 +212,20 @@ logic defect:
   threshold).
 - They correlate with grasp slip: slip <=0.001 m succeeds; 0.012-0.019 m fails (the
   needle's length amplifies small grip errors past the ring opening).
-- This matches the paper: DexMimicGen reports data-generation success rates of **29-76%**
-  across tasks and explicitly flags Threading as the hardest (success <70%, heavy
-  occlusion). The pipeline relies on **oversample-then-filter** to keep only successful
-  demos, so a moderate per-attempt rate is expected rather than a defect.
+- The pipeline relies on **oversample-then-filter** (a per-task success check discards
+  failed attempts), so a moderate per-attempt rate is expected by design rather than a
+  defect — the paper generates 1000 demos per task this way.
+
+> **On comparing to the paper's numbers.** The paper does *not* publish per-attempt
+> data-generation success rates for these nine core tasks, so there is no published
+> per-task figure to match. The rates it does report are different quantities: 29.1 /
+> 43.6 / 76.4% are data-generation rates for the separate **BiGym** benchmark tasks
+> (FlipCup / DishwasherLoadPlates / CupBoardsCloseAll), and 69.3 / 80.7 / 76.0% are
+> downstream **BC policy** success rates (Threading / Piece Assembly / Drawer Cleanup),
+> not generation rates. "Alignment" here therefore means reproducing the
+> oversample-then-filter *mechanism* and the qualitative difficulty ordering the paper
+> describes (Threading flagged as hardest due to occlusion), not hitting a specific
+> per-attempt percentage.
 
 Residual precision could be improved further by reducing grasp slip, but it is not a
 blocker for running the pipeline end-to-end.
@@ -239,12 +255,140 @@ python scripts/generate_dataset.py \
 python scripts/playback_datasets.py --dataset datasets_gen/two_arm_threading.hdf5
 ```
 
-## 7. Changed-File Index
+For the GR1/dex tasks (`coffee`, `pouring`) **skip Step 1** and run Step 2 directly on the
+shipped source, whose `datagen_info` is authoritative (see §7):
+
+```bash
+python scripts/generate_dataset.py \
+    --task two_arm_coffee \
+    --source datasets_src/generated/two_arm_coffee.hdf5 \
+    --output datasets_gen/two_arm_coffee.hdf5 \
+    --num_demos 5 --num_src 10
+```
+
+## 7. Extension to the Full 9-Task Suite
+
+Threading above is the running example used to debug the pipeline. The same interface +
+config pattern was then extended to all **nine** DexMimicGen tasks across three
+embodiments. Each task needs a `DexMG_Config` (subtask structure) in
+`dexmimicgen/configs/task_configs.py` and an env interface (eef map, object poses, grasp
+signals) in `dexmimicgen/env_interfaces/robosuite.py`.
+
+| task | embodiment | action dim | dominant subtask type | verification |
+|------|-----------|-----------|-----------------------|--------------|
+| `two_arm_threading`             | Panda ×2    | 14 | coordination | end-to-end (5/58 ≈ 9–20%) |
+| `two_arm_three_piece_assembly`  | Panda ×2    | 14 | sequential   | **end-to-end (5/216 ≈ 2.3%)** |
+| `two_arm_transport`             | Panda ×2    | 14 | coordination (handover) | static (no source data) |
+| `two_arm_lift_tray`             | PandaDex ×2 | 24 | coordination | **end-to-end (5/128 ≈ 3.9%)** |
+| `two_arm_box_cleanup`           | PandaDex ×2 | 24 | coordination | **end-to-end (5/9 ≈ 56%)** |
+| `two_arm_drawer_cleanup`        | PandaDex ×2 | 24 | sequential   | **end-to-end (5/5)** |
+| `two_arm_coffee`                | GR1FixedLowerBody | 24 | sequential | **end-to-end (5/74 ≈ 6.8%)** |
+| `two_arm_pouring`               | GR1FixedLowerBody | 24 | sequential | **end-to-end (5/10 ≈ 50%)** |
+| `two_arm_can_sort_random`       | GR1ArmsOnly | 24 | coordination (handover) | static (no source data) |
+
+All **seven tasks that ship a source dataset** in `datasets_src/generated/` are now
+verified end-to-end. `two_arm_transport` and `two_arm_can_sort_random` have **no source
+hdf5** in this repo, so they cannot be generated/verified here — their configs and
+interfaces exist but remain static-only.
+
+"static" = env + interface instantiate; action dims and per-arm slices are correct;
+object poses and grasp/stage signals compute; `compose_action` round-trips to finite
+values (and, for GR1, the absolute-pose encode/decode round-trips to ~1e-7). "end-to-end"
+= the full prepare → generate loop produces filtered successful demos.
+
+### Two action conventions
+
+- **OSC (Panda, PandaDex)** — each arm contributes `[dpos(3), daxisangle(3)]` as an OSC
+  delta pose plus a gripper slice (Panda parallel-jaw `gripper_dim=1`; PandaDex hand
+  `gripper_dim=6`). This is the base `DexMG_EnvInterface` convention.
+- **Whole-body IK (GR1)** — both arms live on a single robot driven by a
+  `WholeBodyIK` / `WholeBodyMinkIK` composite controller. The 24-dim action is
+  `[right_eef(6), left_eef(6), right_hand(6), left_hand(6)]`, where each `*_eef(6)` is an
+  **absolute** target pose `[pos(3), axis_angle(3)]` expressed in the **world** frame, not a
+  delta and not base-relative. This was confirmed two ways on `two_arm_coffee.hdf5`: the
+  controller records `input_ref_frame="world"`, and decoding a recorded action as a
+  world-frame pose reproduces the achieved grip-site pose to ~0.022 m / ~1.8° (decoding it
+  as a base-frame pose is off by ~1.09 m, the base height). The shipped
+  `datagen_info/target_pose` equals the action's `[pos, axis_angle]` **exactly** (0.00 error).
+  `GR1Interface` overrides `target_pose_to_action`, `action_to_target_pose`,
+  `_arm_action_slices` and `env_action_dim` accordingly — a straight world-frame pack/unpack
+  with no base transform. Note GR1 handedness is mirrored relative to the Panda tasks: the
+  right hand works the **+y** objects.
+
+### Verification harness
+
+`drawer_cleanup` was validated end-to-end (prepare 10 → generate): 5/5 attempts
+succeeded, and `analyze_src_demo.py` confirmed the stage order (object grasped @74 →
+drawer open @175 → object placed @222 → drawer closed @258 → success @261) matches the
+sequential `wait_for` gating in its config.
+
+`lift_tray` was then validated end-to-end (prepare 10 → generate 5/128 ≈ 3.9%). It
+surfaced a general PandaDex issue: the Inspire dexterous hand grasps by **cradling** the
+tray handle rather than pinching, so robosuite's contact-based `env._check_grasp` reports
+*no grasp for the entire trajectory* and the `grasp_handle0/1` signals never rise — prepare
+appears to succeed but generate dies with `No valid subtask termination for grasp_handle0`.
+Fix: a reusable `RobosuiteInterface._near(eef_site, object_geoms, threshold)` helper that
+fires on grip-site-to-geom-centroid proximity instead of contact. For lift_tray the two
+grip→handle distances cross 0.13 m cleanly at t≈373/384, before the tray lifts (pot rises
++0.03 m at t≈422), giving a clean parallel-then-coordination segmentation. The low 3.9%
+per-attempt rate reflects the oversample-then-filter design on long (≈440–555 step)
+dual-dex-hand trajectories, not a logic defect. `three_piece_assembly` (Panda, sequential) was validated end-to-end (5/216 ≈ 2.3%). A
+source-demo trace confirmed its handedness and ordering: piece_1 sampled at -y is grasped
+by robot 0 (right), piece_2 at +y by robot 1 (left), and the stage signals fire in
+sequence (grasp_1 @53 → grasp_2 @65 → place_1 @104 → second_piece_assembled @222), matching
+the left-waits-for-right gating in its config. The low rate reflects the two-stage
+precision stacking, not a defect.
+
+`box_cleanup` (PandaDex, coordination) was validated end-to-end (5/9 ≈ 56%). Contrary to
+the lift_tray expectation, it did **not** need the `_near` fix: its lid is grasped at the
+edges by two parallel-pinch hand poses, so robosuite's contact-based `_check_grasp` fires
+normally (active for 86 / 18 steps in the trace) while the lid centroid stays ~0.19 m from
+each grip site (too far for a proximity threshold). This confirms `_near` is specific to
+the *cradle* grasp geometry in lift_tray, not a blanket PandaDex requirement — the grasp
+signal mechanism must be chosen per task from the source-demo contact trace.
+
+The two GR1 tasks with source data (`coffee`, `pouring`) were validated end-to-end
+(coffee 5/74 ≈ 6.8%; pouring 5/10 ≈ 50%). They surfaced the most important dex-hand
+finding, below. `transport` and `can_sort_random` ship no source dataset in this repo, so
+their arm-role / stage-order designs remain flagged with `NOTE` comments in code and are
+not verifiable here.
+
+### Dex-hand grasp signals are not recomputable at replay — use the shipped `datagen_info`
+
+For the Inspire dexterous hand, the contact-based grasp subtask signal **cannot be
+reproduced by replaying a demo**. Verified on `two_arm_coffee.hdf5` demo_0: the shipped
+`datagen_info/subtask_term_signals/grasp` is active for 200 steps (first rise t=90), but
+`env._check_pod_is_grasped()` returns **zero** active steps under every replay path tried —
+live `env.step(actions)`, per-step `reset_to(states[t])`, and `reset_to + sim.forward()`.
+The finger contacts that produced the signal only existed during the original
+teleoperation; `set_state` + forward does not repopulate them. Non-contact signals are
+unaffected — coffee `insertion` and `rim` reproduce the shipped signal **100%** via per-step
+`reset_to` + `env._get_partial_task_metrics()`.
+
+Consequence: the shipped source `datagen_info` group is **authoritative** for dex tasks.
+`prepare_src_dataset.py` *recomputes and overwrites* that group via the env interface,
+which zeroes out the dex grasp boundary and makes `generate_dataset` die with
+`No valid subtask termination for grasp`. The correct reproduction for the GR1/dex tasks is
+to **run `generate_dataset.py` directly on the shipped source** (it already carries a
+complete `datagen_info`: eef_pose, target_pose, gripper_action, object_poses, and the
+subtask_term_signals) and **skip the re-prepare step**. The subtask signal names in the
+configs/interfaces were also aligned to the canonical shipped names
+(coffee: `grasp`/`insertion`/`rim`; pouring: `cup_grasped`/`bowl_grasped`/`bowl_on_pad`),
+replacing the earlier invented names (`grasp_pod`/`pod_inserted`, `grasp_cup`/`grasp_bowl`)
+that did not exist in the source and caused `KeyError` during parsing.
+
+> **Note on running the pipeline.** The environment has a 4 GB cgroup memory cap
+> (`/sys/fs/cgroup/memory.max`), enough for exactly one prepare/generate pipeline. Running
+> two tasks concurrently OOM-kills one of them (seen as `Killed` with no traceback), so run
+> the tasks **serially**.
+
+## 8. Changed-File Index
 
 | file | change |
 |------|--------|
-| `dexmimicgen/configs/task_configs.py` | fix right/left `object_ref` and grasp-signal mapping |
-| `dexmimicgen/env_interfaces/robosuite.py` | swap `robot_idx` of grasp signals in `get_subtask_term_signals` |
+| `dexmimicgen/configs/task_configs.py` | fix threading right/left `object_ref`+grasp mapping; add configs for the other 8 tasks |
+| `dexmimicgen/env_interfaces/robosuite.py` | swap `robot_idx` of threading grasp signals; add interfaces for the other 8 tasks; add `GR1Interface` absolute **world-frame** pose conversion (corrected from an earlier base-frame attempt); align coffee/pouring subtask signal names to the shipped canonical names; add `_near()` proximity grasp helper for dex-hand tasks |
 | `dexmimicgen/datagen/data_generator.py` | add shared-transform overrides to `_plan_subtask`; add `coord_anchor` shared coordination anchor in `generate()` |
 | `dexmimicgen/datagen/waypoint.py` | revert hold-based coordination sync; remove unused `_coordination_group` |
+| `scripts/analyze_src_demo.py` | add source-demo diagnostic (grasp handedness + signal edge ordering) |
 
